@@ -1,0 +1,9 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+sqlalchemy>=2.0
+python-multipart>=0.0.9
+httpx>=0.27
+numpy>=1.26
+opencv-python-headless>=4.9,<5  # 5.x dropped the Haar cascade face detector
+faster-whisper>=1.0
+anthropic>=0.40

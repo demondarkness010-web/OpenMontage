@@ -1,0 +1,6 @@
+node_modules/
+.next/
+next-env.d.ts
+*.tsbuildinfo
+# The repo root ignores any "projects/" dir (OpenMontage workspaces); this one is a route.
+!src/app/app/projects/

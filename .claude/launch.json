@@ -12,6 +12,19 @@
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "4788", "--bind", "127.0.0.1"],
       "port": 4788
+    },
+    {
+      "name": "capclip-api",
+      "runtimeExecutable": "capclip/server/.venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "capclip.api:app", "--app-dir", "capclip/server", "--host", "127.0.0.1", "--port", "8000"],
+      "port": 8000,
+      "autoPort": false
+    },
+    {
+      "name": "capclip-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "capclip/web", "run", "dev"],
+      "port": 3000
     }
   ]
 }

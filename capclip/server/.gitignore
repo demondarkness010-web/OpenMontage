@@ -1,0 +1,7 @@
+.venv/
+data/
+__pycache__/
+tests/sample/
+.env
+# The repo root ignores any "pipeline/" dir (OpenMontage outputs); this one is source.
+!capclip/pipeline/
