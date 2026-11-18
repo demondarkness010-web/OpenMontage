@@ -1,0 +1,445 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Relief · Photo to 3D</title>
+    <meta name="description" content="Turn any photo into a 3D relief on your device, or a full 3D model with TRELLIS, Hunyuan3D, Tripo or Meshy (free options included)." />
+    <meta name="theme-color" content="#0b0b0d" />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b0b0d'/%3E%3Cpath d='M6 22 13 12l5 6 3-3 5 7z' fill='%23ffb547'/%3E%3C/svg%3E" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&family=Instrument+Serif:ital@1&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.187.0/build/three.module.js",
+          "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.187.0/examples/jsm/"
+        }
+      }
+    </script>
+    <script type="module" src="./src/main.js"></script>
+  </head>
+  <body>
+    <div class="app" data-state="empty" data-tab="relief">
+      <!-- ============================== Stage ============================== -->
+      <main class="stage" id="stage">
+        <div class="viewport" id="viewport"></div>
+        <div class="vignette" aria-hidden="true"></div>
+
+        <header class="topbar">
+          <a class="brand" href="./" aria-label="Relief home">
+            <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" /><path d="M6 22 13 12l5 6 3-3 5 7z" /></svg>
+            <span class="wordmark">Relief</span>
+          </a>
+          <div class="file-chip" id="fileChip" hidden>
+            <span class="file-name" id="fileName"></span>
+            <span class="file-meta" id="fileMeta"></span>
+          </div>
+          <button class="btn btn-ghost btn-sm" id="newBtn" hidden>
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 4v12M4 10h12" /></svg>
+            New image
+          </button>
+        </header>
+
+        <!-- Empty state -->
+        <section class="empty" id="empty" aria-labelledby="emptyTitle">
+          <p class="eyebrow">Photo or words to 3D</p>
+          <h1 id="emptyTitle">Make anything <em>3D.</em></h1>
+          <p class="lede">
+            Drop a photo or describe an object. Free AI builds a full 3D model you can spin and download, or lifts any
+            photo into a depth relief right on your device.
+          </p>
+          <div class="start">
+            <label class="drop" id="drop" tabindex="0">
+              <input type="file" id="fileInput" accept="image/*" hidden />
+              <span class="drop-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0-4.5 4.5M12 4l4.5 4.5M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" /></svg>
+              </span>
+              <span class="drop-text">
+                <span class="drop-title">Upload a photo</span>
+                <span class="drop-sub">Drop it anywhere, or paste with <kbd>Ctrl</kbd> <kbd>V</kbd></span>
+              </span>
+            </label>
+            <div class="or" aria-hidden="true"><span>or describe it</span></div>
+            <form class="prompt" id="promptForm" autocomplete="off">
+              <span class="prompt-icon" aria-hidden="true">
+                <svg viewBox="0 0 20 20"><path d="M10 2.5l1.6 4.4 4.4 1.6-4.4 1.6L10 14.5l-1.6-4.4L4 8.5l4.4-1.6zM15.5 13l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z" /></svg>
+              </span>
+              <input id="promptInput" type="text" maxlength="300" placeholder="A ceramic owl figurine" aria-label="Describe an object" />
+              <button class="btn btn-primary" id="promptBtn" type="submit">Create</button>
+            </form>
+            <div class="ideas" id="ideas" aria-label="Ideas">
+              <button type="button" data-idea="a wooden treasure chest with brass corners">Treasure chest</button>
+              <button type="button" data-idea="a knight's steel helmet">Helmet</button>
+              <button type="button" data-idea="a tiny mushroom house with a red roof">Mushroom house</button>
+              <button type="button" data-idea="surprise">Surprise me</button>
+            </div>
+          </div>
+          <div class="samples">
+            <div class="sample-group">
+              <span class="samples-label">Objects <i>→</i> 3D model</span>
+              <div class="sample-row">
+                <button class="sample" data-src="./samples/owl.jpg" data-name="owl.jpg" data-tab="model"><img src="./samples/owl.jpg" alt="Ceramic owl" /></button>
+                <button class="sample" data-src="./samples/robot.jpg" data-name="robot.jpg" data-tab="model"><img src="./samples/robot.jpg" alt="Toy robot" /></button>
+                <button class="sample" data-src="./samples/lantern.jpg" data-name="lantern.jpg" data-tab="model"><img src="./samples/lantern.jpg" alt="Brass lantern" /></button>
+              </div>
+            </div>
+            <div class="sample-group">
+              <span class="samples-label">Scenes <i>→</i> depth relief</span>
+              <div class="sample-row">
+                <button class="sample" data-src="./samples/street.jpg" data-name="street.jpg" data-tab="relief"><img src="./samples/street.jpg" alt="City street" /></button>
+                <button class="sample" data-src="./samples/skyline.jpg" data-name="skyline.jpg" data-tab="relief"><img src="./samples/skyline.jpg" alt="Skyline in fog" /></button>
+                <button class="sample" data-src="./samples/citadel.jpg" data-name="citadel.jpg" data-tab="relief"><img src="./samples/citadel.jpg" alt="Floating citadel" /></button>
+              </div>
+            </div>
+          </div>
+          <p class="fineprint" id="emptyNote">Depth reliefs never leave your device. 3D models are made on free cloud GPUs.</p>
+          <button class="link back-link" id="backBtn" hidden></button>
+        </section>
+
+        <!-- Text to image: drawing -->
+        <section class="imagine" aria-live="polite">
+          <div class="imagine-ph" aria-hidden="true"><span></span></div>
+          <p class="mgen-engine">Free image AI</p>
+          <h2>Drawing your object</h2>
+          <p class="imagine-prompt" id="imaginePrompt"></p>
+          <div class="bar indeterminate" aria-hidden="true"><span></span></div>
+          <p class="note">Usually 5 to 15 seconds. Next, you'll turn the picture into a 3D model.</p>
+        </section>
+
+        <!-- Relief: processing -->
+        <section class="processing" id="processing" aria-live="polite">
+          <div class="scan">
+            <img id="procImg" alt="" />
+            <div class="scanline" aria-hidden="true"></div>
+          </div>
+          <ol class="steps">
+            <li data-step="load"><span class="dot"></span><span class="step-label">Load depth model</span><span class="step-meta" id="loadMeta"></span></li>
+            <li data-step="infer"><span class="dot"></span><span class="step-label">Estimate depth</span><span class="step-meta" id="inferMeta"></span></li>
+            <li data-step="build"><span class="dot"></span><span class="step-label">Build 3D mesh</span><span class="step-meta"></span></li>
+          </ol>
+          <div class="bar" aria-hidden="true"><span id="bar"></span></div>
+        </section>
+
+        <!-- Model: ready to generate -->
+        <section class="mready" aria-labelledby="mreadyTitle">
+          <div class="mcard">
+            <div class="mleft">
+              <div class="scan still">
+                <img id="mreadyImg" alt="" />
+                <div class="scanline" id="planScan" aria-hidden="true" hidden></div>
+              </div>
+              <ul class="checks" id="checks" aria-label="Photo check"></ul>
+              <p class="verdict" id="verdict"></p>
+            </div>
+            <div class="mside">
+              <p class="mgen-engine">AI 3D plan</p>
+              <h2 id="mreadyTitle">Ready to build a 3D model</h2>
+              <div class="plan" id="plan" aria-live="polite"></div>
+              <div class="mready-actions">
+                <button class="btn btn-primary" id="mreadyBtn">
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m10 2 7 4v8l-7 4-7-4V6zM3 6l7 4 7-4M10 10v8" /></svg>
+                  <span id="mreadyLabel">Generate</span>
+                </button>
+                <button class="btn" id="redrawBtn" hidden>
+                  <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M16 10a6 6 0 1 1-1.8-4.3M16 3.5v3h-3" /></svg>
+                  <span id="redrawLabel">Redraw</span>
+                </button>
+                <button class="btn" id="useReliefBtn" hidden>Make a depth relief</button>
+              </div>
+              <p class="note" id="mreadyNote"></p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Model: generating -->
+        <section class="mgen" aria-live="polite">
+          <div class="mcard">
+            <div class="scan">
+              <img id="mgenImg" alt="" />
+              <div class="scanline" aria-hidden="true"></div>
+            </div>
+            <div class="mside">
+              <p class="mgen-engine" id="mgenEngine"></p>
+              <h2 id="mgenTitle">Sending your photo</h2>
+              <ol class="steps" id="mgenSteps">
+                <li><span class="dot"></span><span class="step-label">Send the photo</span><span class="step-meta"></span></li>
+                <li><span class="dot"></span><span class="step-label" id="queueLabel">Wait for a free GPU</span><span class="step-meta" id="queueMeta"></span></li>
+                <li><span class="dot"></span><span class="step-label">Build the 3D model</span><span class="step-meta"></span></li>
+                <li><span class="dot"></span><span class="step-label">Download and open</span><span class="step-meta"></span></li>
+              </ol>
+              <p class="mgen-log" id="mgenLog">&nbsp;</p>
+              <div class="mgen-meta"><span id="mgenTime">0:00</span><span aria-hidden="true">·</span><span id="mgenEta"></span><span aria-hidden="true">·</span><button class="link" id="mgenCancel">Cancel</button></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Error -->
+        <section class="error" id="error" role="alert">
+          <h2 id="errorTitle">That didn't work</h2>
+          <p id="errorMsg"></p>
+          <div class="error-actions">
+            <button class="btn btn-primary" id="lighterBtn" hidden></button>
+            <button class="btn btn-primary" id="retryBtn">Try again</button>
+            <button class="btn btn-ghost" id="errorNewBtn">Pick another image</button>
+          </div>
+        </section>
+
+        <p class="hint" id="hint"></p>
+        <div class="result" id="result">
+          <span class="result-ok" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="m3.5 8.5 3 3 6-7" /></svg></span>
+          <span class="result-t"><b id="resultTitle"></b><small id="resultMeta"></small></span>
+          <button class="btn btn-primary btn-sm" id="resultGlb">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v10m0 0-4-4m4 4 4-4M4 16h12" /></svg>
+            Download .glb
+          </button>
+        </div>
+        <div class="rec-badge" id="recBadge" hidden><span class="rec-dot"></span>Recording <span id="recPct">0%</span></div>
+      </main>
+
+      <!-- ============================== Panel ============================== -->
+      <aside class="panel" id="panel" aria-label="Controls">
+        <nav class="tabs" role="tablist" aria-label="Mode">
+          <button role="tab" data-tab="model" id="tab-model" aria-controls="panel-model">
+            <b>AI 3D model</b><small>Free · cloud</small>
+          </button>
+          <button role="tab" data-tab="relief" id="tab-relief" aria-controls="panel-relief">
+            <b>Depth relief</b><small>On your device</small>
+          </button>
+        </nav>
+
+        <!-- ------------------------------ Relief ------------------------------ -->
+        <div class="tabpanel" id="panel-relief" role="tabpanel" aria-labelledby="tab-relief">
+          <section class="group">
+            <h3>View</h3>
+            <div class="row">
+              <span class="row-label">Render</span>
+              <div class="seg" data-key="mode" role="radiogroup" aria-label="Render">
+                <button data-value="mesh">Mesh</button><button data-value="points">Points</button><button data-value="wire">Wire</button>
+              </div>
+            </div>
+            <div class="row">
+              <span class="row-label">Material</span>
+              <div class="seg" data-key="shading" role="radiogroup" aria-label="Material">
+                <button data-value="photo">Photo</button><button data-value="studio">Studio</button><button data-value="clay">Clay</button><button data-value="depth">Depth</button>
+              </div>
+            </div>
+            <div class="row">
+              <span class="row-label">Camera</span>
+              <div class="seg" data-key="camera" role="radiogroup" aria-label="Camera">
+                <button data-value="parallax">Parallax</button><button data-value="orbit">Orbit</button>
+              </div>
+            </div>
+            <label class="field" data-key="motion" data-when="camera=parallax">
+              <span class="field-label">Motion</span><output></output>
+              <input type="range" min="0" max="1" step="0.01" />
+            </label>
+            <div class="row" data-when="camera=orbit">
+              <span class="row-label">Auto-rotate</span>
+              <button class="switch" data-key="autoRotate" role="switch" aria-label="Auto-rotate"><span></span></button>
+            </div>
+            <label class="field" data-key="pointSize" data-when="mode=points">
+              <span class="field-label">Point size</span><output></output>
+              <input type="range" min="0.4" max="3" step="0.05" />
+            </label>
+            <div class="row">
+              <span class="row-label">Backdrop</span>
+              <div class="seg" data-key="backdrop" role="radiogroup" aria-label="Backdrop">
+                <button data-value="ink">Ink</button><button data-value="paper">Paper</button><button data-value="none">None</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="group">
+            <h3>Depth</h3>
+            <label class="field" data-key="depthScale">
+              <span class="field-label">Strength</span><output></output>
+              <input type="range" min="0" max="1.5" step="0.01" />
+            </label>
+            <label class="field" data-key="curve">
+              <span class="field-label">Curve</span><output></output>
+              <input type="range" min="0.4" max="2.5" step="0.01" />
+            </label>
+            <label class="field" data-key="smoothing">
+              <span class="field-label">Smoothing</span><output></output>
+              <input type="range" min="0" max="10" step="0.5" />
+            </label>
+            <label class="field" data-key="edgeCut">
+              <span class="field-label">Edge tearing</span><output></output>
+              <input type="range" min="0" max="1" step="0.01" />
+            </label>
+            <div class="row">
+              <span class="row-label">Invert depth</span>
+              <button class="switch" data-key="invert" role="switch" aria-label="Invert depth"><span></span></button>
+            </div>
+          </section>
+
+          <section class="group">
+            <h3>Mesh</h3>
+            <label class="field" data-key="segments">
+              <span class="field-label">Resolution</span><output></output>
+              <input type="range" min="64" max="1024" step="32" />
+            </label>
+            <div class="row">
+              <span class="row-label">Solid base</span>
+              <button class="switch" data-key="solid" role="switch" aria-label="Solid base"><span></span></button>
+            </div>
+            <label class="field" data-key="thickness" data-when="solid=true">
+              <span class="field-label">Base thickness</span><output></output>
+              <input type="range" min="0.05" max="1" step="0.01" />
+            </label>
+            <p class="stats" id="stats">No mesh yet</p>
+          </section>
+
+          <section class="group">
+            <h3>Depth model</h3>
+            <div class="seg seg-tall" data-key="quality" role="radiogroup" aria-label="Model quality">
+              <button data-value="fast"><b>Fast</b><small id="fastSize">Small</small></button>
+              <button data-value="detail"><b>Detail</b><small id="detailSize">Base</small></button>
+            </div>
+            <div class="row">
+              <span class="row-label">Run on</span>
+              <div class="seg" data-key="accel" role="radiogroup" aria-label="Accelerator">
+                <button data-value="gpu">GPU</button><button data-value="cpu">CPU</button>
+              </div>
+            </div>
+            <p class="stats" id="engine">Depth Anything V2</p>
+          </section>
+
+          <section class="group">
+            <h3>Export</h3>
+            <div class="exports">
+              <button class="btn" id="reliefBlenderBtn" hidden title="Keep this relief in History, then clean and lighten it with Blender">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16 15 5M12 4l4 4M3 13l4 4" /></svg>
+                Fix with Blender
+              </button>
+              <button class="btn btn-primary" data-export="glb">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m10 2 7 4v8l-7 4-7-4V6zM3 6l7 4 7-4M10 10v8" /></svg>
+                3D model <small>.glb</small>
+              </button>
+              <button class="btn" data-export="png">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2" /><circle cx="10" cy="10" r="3" /></svg>
+                Snapshot <small>.png</small>
+              </button>
+              <button class="btn" data-export="depth">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="3" width="14" height="14" rx="2" /><path d="M3 13l4-4 3 3 2-2 5 5" /></svg>
+                Depth map <small>.png</small>
+              </button>
+              <button class="btn" data-export="video">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="5" width="11" height="10" rx="2" /><path d="m13.5 9 4-2.5v7l-4-2.5" /></svg>
+                <span class="label">Loop clip</span> <small>6s</small>
+              </button>
+            </div>
+          </section>
+        </div>
+
+        <!-- ------------------------------ AI model ------------------------------ -->
+        <div class="tabpanel" id="panel-model" role="tabpanel" aria-labelledby="tab-model">
+          <section class="group">
+            <h3>Engine</h3>
+            <p class="notice" id="keyNotice" hidden></p>
+            <div class="engines" id="engines" role="radiogroup" aria-label="Engine"></div>
+            <div class="engine-options" id="engineOptions"></div>
+            <div class="quote" id="quoteRow"><span>Estimated cost</span><b id="quote">$0.00</b></div>
+            <button class="btn btn-primary btn-block" id="generateBtn">
+              <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m10 2 7 4v8l-7 4-7-4V6zM3 6l7 4 7-4M10 10v8" /></svg>
+              <span id="generateLabel">Generate 3D model</span>
+            </button>
+            <p class="note" id="paidNote">Charged to your fal.ai account.</p>
+            <p class="note" id="freeNote" hidden></p>
+          </section>
+
+          <section class="group" data-needs-model>
+            <h3>View</h3>
+            <div class="row">
+              <span class="row-label">Material</span>
+              <div class="seg" data-mkey="material" role="radiogroup" aria-label="Model material">
+                <button data-value="textured">Textured</button><button data-value="clay">Clay</button><button data-value="wire">Wire</button><button data-value="normals">Normals</button>
+              </div>
+            </div>
+            <div class="row">
+              <span class="row-label">Auto-rotate</span>
+              <button class="switch" data-mkey="autoRotate" role="switch" aria-label="Auto-rotate model"><span></span></button>
+            </div>
+            <div class="row">
+              <span class="row-label">Ground shadow</span>
+              <button class="switch" data-mkey="ground" role="switch" aria-label="Ground shadow"><span></span></button>
+            </div>
+            <div class="row">
+              <span class="row-label">Backdrop</span>
+              <div class="seg" data-key="backdrop" role="radiogroup" aria-label="Backdrop">
+                <button data-value="ink">Ink</button><button data-value="paper">Paper</button><button data-value="none">None</button>
+              </div>
+            </div>
+            <p class="stats" id="modelStats"></p>
+          </section>
+
+          <section class="group" data-needs-model>
+            <h3>Download</h3>
+            <div class="exports">
+              <button class="btn btn-primary" data-mexport="glb">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m10 2 7 4v8l-7 4-7-4V6zM3 6l7 4 7-4M10 10v8" /></svg>
+                3D model <small>.glb</small>
+              </button>
+              <button class="btn" data-mexport="png">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="3" y="4" width="14" height="12" rx="2" /><circle cx="10" cy="10" r="3" /></svg>
+                Snapshot <small>.png</small>
+              </button>
+              <button class="btn" data-mexport="video">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.5" y="5" width="11" height="10" rx="2" /><path d="m13.5 9 4-2.5v7l-4-2.5" /></svg>
+                <span class="label">Turntable</span> <small>6s</small>
+              </button>
+            </div>
+            <div class="blender-fix" id="blenderFix" hidden>
+              <button class="btn" id="blenderBtn">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16 15 5M12 4l4 4M3 13l4 4" /></svg>
+                Fix with Blender
+              </button>
+              <p id="blenderNote">Removes floating bits, fills small holes, fixes flipped faces and trims huge models to 150k triangles so they spin smoothly. Saved as a new model; the original stays.</p>
+            </div>
+            <div class="formats" role="group" aria-label="Other formats">
+              <span>Other formats</span>
+              <button data-format="obj" title="Geometry for any 3D app (no materials)">.obj</button>
+              <button data-format="stl" title="For 3D printing: Z up, real size in millimetres">.stl <i>print</i></button>
+              <button data-format="ply" title="Geometry with vertex colours">.ply</button>
+              <button data-format="usdz" title="AR Quick Look on iPhone and iPad">.usdz <i>AR</i></button>
+            </div>
+            <div class="format-links" id="formatLinks"></div>
+          </section>
+
+          <section class="group">
+            <h3>History</h3>
+            <ul class="history" id="history"><li class="history-empty">Your generated models appear here.</li></ul>
+          </section>
+        </div>
+
+        <footer class="panel-foot">
+          <button class="link" id="resetBtn">Reset settings</button>
+          <span>Double-click a slider to reset it</span>
+        </footer>
+      </aside>
+
+      <dialog class="dialog" id="confirm" aria-labelledby="confirmTitle">
+        <form method="dialog">
+          <h2 id="confirmTitle">Generate a 3D model?</h2>
+          <dl class="confirm-rows">
+            <div><dt>Image</dt><dd id="confirmImage"></dd></div>
+            <div><dt>Engine</dt><dd id="confirmEngine"></dd></div>
+            <div><dt>Options</dt><dd id="confirmOptions"></dd></div>
+            <div><dt>Cost</dt><dd id="confirmCost"></dd></div>
+          </dl>
+          <p class="note" id="confirmNote">Charged to your fal.ai account when the job runs.</p>
+          <div class="dialog-actions">
+            <button class="btn" value="cancel">Cancel</button>
+            <button class="btn btn-primary" value="ok" id="confirmOk">Generate</button>
+          </div>
+        </form>
+      </dialog>
+
+      <div class="dropveil" id="dropveil" aria-hidden="true"><div>Drop your photo</div></div>
+      <div class="toasts" id="toasts" aria-live="polite"></div>
+    </div>
+  </body>
+</html>
