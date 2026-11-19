@@ -4,7 +4,8 @@ import { ReliefViewer } from './viewer.js';
 import { estimateDepth, detectDevice } from './depth-engine.js';
 import { loadImage, downloadBlob, baseName } from './image.js';
 import { ENGINES, isVisible, money } from './models.js';
-import { getConfig, startJob, saveLocalJob, waitForJob, listJobs, cancelJob, cleanJob, deleteJob, encodeForUpload, imagine, analyzePhoto, cleanupPhoto } from './cloud.js';
+import { getConfig, startJob, saveLocalJob, waitForJob, listJobs, cancelJob, cleanJob, deleteJob, getJob, encodeForUpload, imagine, analyzePhoto, cleanupPhoto,
+  blenderStatus, blenderCheck, inspectJob, exportJob, cancelTask, waitForTask, getJSON } from './cloud.js';
 import { buildFlat, openness } from './flat.js';
 import { exportModel } from './exporters.js';
 import { checkPhoto } from './photocheck.js';
@@ -651,7 +652,15 @@ function studyPhoto() {
       } catch (err) {
         console.warn('openness check failed', err);
       }
-      plan.analysis = { ...analysis, see_through: seeThrough, cut_off: plan.cleaned?.canvas.cutOff ?? [] };
+      // Does the photo itself look like a scene (busy, no single object)? The vision AI sometimes
+      // names one small thing in a whole garden, so the planner weighs this pixel evidence too.
+      let photoScene = false;
+      try {
+        photoScene = !!checkPhoto(source.depthInput, source).sceneLike;
+      } catch (err) {
+        console.warn('scene check failed', err);
+      }
+      plan.analysis = { ...analysis, see_through: seeThrough, photo_scene: photoScene, cut_off: plan.cleaned?.canvas.cutOff ?? [] };
       applyPlan();
     } catch (err) {
       if (token !== planToken) return;
@@ -1038,6 +1047,7 @@ function syncGenerateButtons() {
   const busy = gen.state === 'generating';
   const usable = !config.offline && (ENGINES[settings.engine].free || config.fal);
   for (const id of ['#generateBtn', '#mreadyBtn']) $(id).disabled = !usable || busy;
+  syncBlenderButtons();
 }
 
 function describeOptions(engine, opts) {
@@ -1290,7 +1300,7 @@ async function showJob(job) {
     texturedBtn.disabled = !viewer.modelTextured;
     texturedBtn.title = texturedBtn.disabled ? 'This model has no texture' : '';
     syncUI();
-    renderBlenderFix(job);
+    renderBlender(job);
     const links = $('#formatLinks');
     links.replaceChildren(
       ...Object.entries(job.formats ?? {}).map(([fmt, url]) => {
@@ -1312,31 +1322,293 @@ async function showJob(job) {
   refreshStage();
 }
 
-/** The "Fix with Blender" box: a button for a fresh model, a summary for a fixed one. */
-function renderBlenderFix(job) {
-  const box = $('#blenderFix');
+// ------------------------------------------------------------------ Blender panel
+// Everything shown here comes from Blender's own measurements (blender/inspector.py). Nothing
+// is estimated in the browser: if a number wasn't measured, it says so.
+
+var blender = null; // last /api/blender/status (var: read by syncGenerateButtons before this line runs)
+var blTask = null; // the inspect/export Blender is running now
+let blProfile = 'print'; // whose checks the inspection card lists
+const reportCache = new Map();
+const PROFILE_NAMES = { web: 'Web', game: 'Game', print: '3D print' };
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const num = (v) => (v == null ? '–' : typeof v !== 'number' ? String(v) : Math.abs(v) >= 1e5 ? `${Math.round(v / 1000)}k` : v.toLocaleString());
+const kb = (b) => (b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1e3))} KB`);
+const ICON = { pass: '✓', warn: '!', fail: '✗', unknown: '?' };
+
+async function loadBlenderStatus(run = false) {
+  try {
+    blender = run ? await blenderCheck() : await blenderStatus();
+  } catch {
+    blender = null;
+  }
+  syncBlenderStatus();
+  if (blender?.checking) setTimeout(() => loadBlenderStatus(), 3000);
+  else if (blender?.found && !blender.checked && !run) loadBlenderStatus(true); // never checked: check once
+}
+
+function syncBlenderStatus() {
+  const s = $('#blStatus');
+  const lines = [];
+  if (!blender?.found) {
+    s.textContent = 'not installed';
+    s.className = 'bl-status bad';
+    lines.push('Blender wasn\'t found. Unzip Blender 4.5 LTS into OpenMontage/.runtime/blender/,', 'or set BLENDER_PATH in .env to blender.exe, then restart serve.py.');
+  } else if (blender.checking) {
+    s.textContent = 'checking…';
+    s.className = 'bl-status';
+    lines.push('Running Blender\'s self-check (about 20–40 s on this PC).');
+  } else {
+    s.textContent = blender.working ? `${(blender.version || '').replace(' LTS', '')} · working` : blender.checked ? 'check failed' : 'not checked';
+    s.className = `bl-status ${blender.working ? 'ok' : 'bad'}`;
+    lines.push(`Blender ${blender.version || '?'} · Python ${blender.python || '?'}`, blender.path || '');
+    for (const [name, c] of Object.entries(blender.checks || {}))
+      lines.push(`${c.ok ? '✓' : '✗'} ${name.replace(/_/g, ' ')}${c.ok ? '' : `: ${c.error}`} (${c.seconds} s)`);
+    if (blender.error) lines.push(`Problem: ${blender.error}`);
+    if (blender.render_device) lines.push(`Cycles renders on: ${blender.render_device}`);
+    if (blender.startup_seconds != null) lines.push(`Start-up: ${blender.startup_seconds} s`);
+    if (blender.disk_free_gb != null) lines.push(`Free disk: ${blender.disk_free_gb} GB`);
+    if (blender.checked) lines.push(`Checked ${new Date(blender.checked * 1000).toLocaleString()}. Click to check again.`);
+  }
+  s.title = lines.filter(Boolean).join('\n');
+  syncBlenderButtons();
+}
+
+function syncBlenderButtons() {
+  const usable = !!blender?.found && !blender.checking;
+  const busy = !!blTask || gen.state === 'generating';
+  $('#blInspectBtn').disabled = !usable || busy;
+  $('#blExportBtn').disabled = !usable || busy;
+  $('#blExportGo').disabled = !usable || busy;
+  const fixed = !!shownJob?.cleaned_from;
+  $('#blenderBtn').disabled = !usable || busy || fixed;
+  $('#blenderBtn').title = fixed ? 'This is already the repaired copy' : 'Repair a copy: every change is checked and undone if it makes things worse';
+  const p = $('#blProgress');
+  p.hidden = !blTask;
+  if (blTask) {
+    const other = shownJob && blTask.job_id !== shownJob.id ? ' (another model)' : '';
+    $('#blProgressText').textContent = `${blTask.kind === 'export' ? 'Exporting' : 'Inspecting'}${other}: ${blTask.progress || 'working'}`;
+  }
+}
+
+async function loadReport(url) {
+  if (!url) return null;
+  if (!reportCache.has(url)) reportCache.set(url, getJSON(url).catch(() => null));
+  return reportCache.get(url);
+}
+
+function scoreButton(key, s, onPick) {
+  const verdict = (s.verdict || '').replace(' ', '-');
+  const b = el(`<button type="button" class="bl-score v-${verdict}" aria-pressed="${key === blProfile}">
+    <b>${s.score ?? '–'}</b><span>${PROFILE_NAMES[key] || key}</span><i>${esc(s.verdict)}</i></button>`);
+  b.title = `${s.failed} failed, ${s.warnings} warning${s.warnings === 1 ? '' : 's'}. Score = (checks passed + ½ × warnings) ÷ checks measured.`;
+  b.addEventListener('click', () => onPick(key));
+  return b;
+}
+
+function shots(urls) {
+  const d = el('<div class="bl-shots"></div>');
+  for (const u of urls || []) {
+    if (!u) continue;
+    const a = el(`<a href="${esc(u)}" target="_blank" rel="noopener" title="Rendered by Blender (Workbench)"><img alt="Blender check picture" loading="lazy"></a>`);
+    a.firstChild.src = u;
+    d.append(a);
+  }
+  return d;
+}
+
+function dims(m) {
+  const d = m?.dimensions_m;
+  return d ? d.map((x) => (x >= 10 ? x.toFixed(1) : x.toFixed(3))).join(' × ') : '–';
+}
+
+/** The inspection card: three scores, the checks behind the chosen one, measured facts, pictures. */
+async function inspectionCard(job) {
+  const ins = job.inspection;
+  if (!ins?.summary) return null;
+  const card = el(`<div class="bl-card"><h4>Inspection <small>${new Date(ins.checked * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small></h4>
+    <div class="bl-scores"></div><ul class="bl-checks"><li class="bl-muted">Loading the measurements…</li></ul><dl class="bl-facts"></dl></div>`);
+  const pick = (key) => {
+    blProfile = key;
+    renderBlender(job);
+  };
+  for (const [key, s] of Object.entries(ins.summary)) $('.bl-scores', card).append(scoreButton(key, s, pick));
+  card.append(shots(ins.renders));
+  const rep = await loadReport(ins.report_url);
+  const m = rep?.inspections?.model || rep?.inspections?.after;
+  const list = $('.bl-checks', card);
+  if (!m) {
+    list.replaceChildren(el('<li class="bl-muted">The detailed report is missing (it may have been cleaned up).</li>'));
+    return card;
+  }
+  list.replaceChildren(
+    ...m.profiles[blProfile].checks.map((c) => {
+      const v = c.value === true ? 'yes' : c.value === false ? 'no' : c.value == null ? 'not measured' : `${num(c.value)}${c.unit ? ` ${c.unit}` : ''}`;
+      return el(`<li><span class="r-${c.result}">${ICON[c.result]}</span><span>${esc(c.label)}</span><span class="val">${esc(v)}</span><small>wanted: ${esc(c.want)}</small></li>`);
+    }),
+  );
+  const facts = [
+    ['Size (model units, m)', dims(m)],
+    ['Triangles', num(m.triangles)],
+    ['Pieces', `${num(m.islands)}${m.specks ? ` (${m.specks} specks)` : ''}`],
+    ['Closed (watertight)', m.watertight ? 'yes' : `no · ${num(m.holes)} hole${m.holes === 1 ? '' : 's'}, ${num(m.boundary_edges)} open edges`],
+    ['Flipped faces', `${num(m.flipped_edges)} edges${m.inside_out ? ' · inside out' : ''}`],
+    ['Self-intersections', m.self_intersecting_triangles == null ? 'not measured' : `${num(m.self_intersecting_triangles)} triangles`],
+    ['UV map', m.has_uvs ? `yes${m.zero_area_uv_triangles ? ` · ${num(m.zero_area_uv_triangles)} squashed` : ''}` : 'no'],
+    ['Textures', m.textures ? `${m.textures} · up to ${m.texture_max_px} px${m.missing_texture_count ? ` · ${m.missing_texture_count} missing` : ''}` : 'none'],
+  ];
+  $('.bl-facts', card).append(...facts.flatMap(([k, v]) => [el(`<dt>${esc(k)}</dt>`), el(`<dd>${esc(v)}</dd>`)]));
+  card.append(el(`<p class="bl-muted">Not measured: ${esc((m.not_measured || []).join(', ') || 'nothing')}. Measured in ${m.seconds} s.</p>`));
+  return card;
+}
+
+/** The repair card of a "+ Blender fix" model: what each step did, what was undone, and the re-check. */
+function fixCard(job) {
   const r = job.report;
-  box.hidden = !config.blender && !r;
-  $('#blenderBtn').hidden = !!job.cleaned_from || !config.blender;
-  const note = $('#blenderNote');
-  if (!job.cleaned_from) {
-    note.textContent = 'Removes floating bits, fills small holes, fixes flipped faces and trims huge models to 150k triangles so they spin smoothly. Saved as a new model; the original stays.';
-    return;
+  if (!r?.before) return legacyFix(r);
+  const card = el(`<div class="bl-card"><h4>What the fix changed <small>${r.seconds ? `${Math.round(r.seconds)} s` : ''}</small></h4></div>`);
+  if (r.profiles_before && r.profiles_after) {
+    card.append(el(`<p class="bl-muted">${Object.keys(r.profiles_after).map((k) =>
+      `${PROFILE_NAMES[k] || k} ${r.profiles_before[k]?.score ?? '–'} → <b style="color:var(--text)">${r.profiles_after[k].score}</b>`).join(' · ')}</p>`));
   }
-  if (!r) {
-    note.textContent = 'Fixed with Blender.';
-    return;
+  const rows = [
+    ['triangles', 'Triangles'], ['islands', 'Pieces'], ['specks', 'Specks'], ['holes', 'Holes'],
+    ['boundary_edges', 'Open edges'], ['flipped_edges', 'Flipped edges'], ['non_manifold_edges', 'Non-manifold edges'],
+    ['degenerate_triangles', 'Zero-area faces'], ['duplicate_vertices', 'Doubled points'], ['self_intersecting_triangles', 'Self-intersections'],
+    ['watertight', 'Watertight'],
+  ];
+  const dl = el('<dl class="bl-facts"></dl>');
+  for (const [k, label] of rows) {
+    const b = r.before[k], a = r.after[k];
+    const show = (v) => (v === true ? 'yes' : v === false ? 'no' : v == null ? '–' : num(v));
+    dl.append(el(`<dt>${label}</dt>`), el(`<dd class="${b !== a ? 'changed' : ''}">${show(b)} → ${show(a)}</dd>`));
   }
-  const n = (v) => (v >= 1e5 ? `${Math.round(v / 1000)}k` : v.toLocaleString());
+  card.append(dl);
+  const steps = el('<ul class="bl-steps"></ul>');
+  for (const s of r.repair || []) {
+    const extra = s.status === 'rolled_back' ? ` <span class="r-warn">undone: ${esc(s.reason)}</span>`
+      : s.status === 'failed' ? ` <span class="r-fail">failed: ${esc(s.reason)}</span>`
+      : s.status === 'skipped' ? ` · skipped, ${esc(s.reason)}`
+      : s.skipped ? ` · ${esc(s.skipped)}` : '';
+    const [cls, icon] = { ok: ['r-pass', '✓'], skipped: ['r-unknown', '–'], failed: ['r-fail', '✗'] }[s.status] || ['r-warn', '↺'];
+    steps.append(el(`<li><span class="${cls}">${icon}</span> <b>${esc(s.step)}</b>${extra}</li>`));
+  }
+  card.append(steps);
+  const v = r.validated;
+  card.append(el(v?.ok
+    ? '<p class="bl-muted"><span class="r-pass">✓</span> The repaired GLB was imported again in a clean scene: same triangles and size.</p>'
+    : `<p class="bl-muted"><span class="r-fail">✗</span> Re-import check: ${esc((v?.problems || ['not run']).join('; '))}</p>`));
+  card.append(shots([r.renders?.before, r.renders?.after]));
+  return card;
+}
+
+/** Reports from the first, single-script Blender fix (before the inspector existed). */
+function legacyFix(r) {
+  if (!r) return null;
   const did = [
     r.islands_removed && `removed ${r.islands_removed} floating bit${r.islands_removed === 1 ? '' : 's'}`,
     r.holes_filled && `filled ${r.holes_filled} hole${r.holes_filled === 1 ? '' : 's'}`,
-    r.merged_vertices && `joined ${n(r.merged_vertices)} doubled points`,
-    r.decimated_from && `trimmed ${n(r.decimated_from)} \u2192 ${n(r.after.triangles)} triangles`,
+    r.merged_vertices && `joined ${num(r.merged_vertices)} doubled points`,
+    r.decimated_from && `trimmed ${num(r.decimated_from)} → ${num(r.after?.triangles)} triangles`,
   ].filter(Boolean);
-  note.replaceChildren(el('<b>Fixed with Blender:</b>'), ` ${did.length ? did.join(', ') : 'the mesh was already clean'}; faces point outward and shading is smoothed.` +
-    ` Took ${Math.round(r.seconds)} s.`);
+  return el(`<div class="bl-card"><h4>Fixed with Blender</h4><p class="bl-muted">${esc(did.join(', ') || 'the mesh was already clean')}.
+    This fix ran before Relief measured results, so press Inspect to check it.</p></div>`);
 }
+
+function exportsCard(job) {
+  const ex = job.exports;
+  if (!ex || !Object.keys(ex).length) return null;
+  const card = el('<div class="bl-card"><h4>Blender exports <small>each file re-imported to check it</small></h4><ul class="bl-files"></ul></div>');
+  const base = prettyName(job.name).replace(/[^\w-]+/g, '-').toLowerCase() || 'model';
+  for (const [fmt, e] of Object.entries(ex)) {
+    const file = e.url.split('/').pop();
+    const name = file.endsWith('.zip') ? `${base}-${fmt}.zip` : `${base}.${file.split('.').pop()}`;
+    const li = el(`<li><span class="${e.ok ? 'r-pass' : 'r-fail'}">${e.ok ? '✓' : '✗'}</span><a download></a><span class="val">${kb(e.bytes)}</span>
+      <small>${e.ok ? 'opens again with the same shape, size and materials' : `problem: ${esc(e.problems.join('; '))}`}</small></li>`);
+    const a = $('a', li);
+    a.href = e.url;
+    a.download = name;
+    a.textContent = name;
+    $('.bl-files', card).append(li);
+  }
+  return card;
+}
+
+let blRender = 0;
+async function renderBlender(job) {
+  const group = $('#blenderGroup');
+  group.hidden = !!config.offline;
+  if (!job || config.offline) return;
+  syncBlenderButtons();
+  const size = $('#blSize');
+  if (size.dataset.job !== job.id) {
+    size.dataset.job = job.id;
+    size.value = job.size_cm || '';
+  }
+  const note = $('#blenderNote');
+  note.textContent = job.cleaned_from ? '' : job.inspection ? '' :
+    'Inspect measures the mesh for holes, flipped faces, specks and more, and scores it for web, games and 3D printing. Fix repairs a copy and undoes any step that makes it worse.';
+  const mine = ++blRender;
+  const cards = [fixCard(job), await inspectionCard(job), exportsCard(job)].filter(Boolean);
+  if (mine !== blRender) return; // a newer model was picked meanwhile
+  $('#blResults').replaceChildren(...cards);
+}
+
+async function runBlenderTask(start) {
+  const job = shownJob;
+  if (!job || blTask) return;
+  try {
+    blTask = await start(job.id);
+  } catch (err) {
+    toast(err.message, 'error');
+    return;
+  }
+  syncBlenderButtons();
+  try {
+    const final = await waitForTask(blTask.id, (t) => {
+      blTask = t;
+      syncBlenderButtons();
+    });
+    if (final.status === 'failed') toast(final.error || 'Blender stopped with an error.', 'error');
+    else if (final.status === 'done' && final.report?.status === 'done_with_problems' && final.kind === 'export')
+      toast('Some files didn\'t pass the re-import check; see the list.', 'error');
+    const fresh = await getJob(final.job_id);
+    replaceJob(fresh);
+    if (shownJob?.id === fresh.id) shownJob = fresh;
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    blTask = null;
+    syncBlenderButtons();
+    if (shownJob) renderBlender(shownJob);
+  }
+}
+
+$('#blStatus').addEventListener('click', () => {
+  if (blender?.found && !blender.checking) loadBlenderStatus(true);
+});
+$('#blInspectBtn').addEventListener('click', () => runBlenderTask(inspectJob));
+$('#blExportBtn').addEventListener('click', () => {
+  const box = $('#blExport');
+  box.hidden = !box.hidden;
+  $('#blExportBtn').setAttribute('aria-expanded', String(!box.hidden));
+});
+$('#blExportGo').addEventListener('click', () => {
+  const formats = $$('#blFormats input:checked').map((i) => i.value);
+  if (!formats.length) return toast('Pick at least one format', 'error');
+  const size = parseFloat($('#blSize').value);
+  $('#blExport').hidden = true;
+  $('#blExportBtn').setAttribute('aria-expanded', 'false');
+  runBlenderTask((id) => exportJob(id, formats, Number.isFinite(size) && size > 0 ? size : null));
+});
+$('#blCancel').addEventListener('click', async () => {
+  if (!blTask) return;
+  try {
+    await cancelTask(blTask.id);
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+});
 
 $('#blenderBtn').addEventListener('click', async () => {
   if (!shownJob || gen.state === 'generating') return;
@@ -1350,7 +1622,7 @@ $('#blenderBtn').addEventListener('click', async () => {
   } catch (err) {
     toast(err.message, 'error');
   } finally {
-    btn.disabled = false;
+    syncBlenderButtons();
   }
 });
 
@@ -1591,6 +1863,8 @@ detectDevice().then((device) => {
 getConfig().then(async (cfg) => {
   config = cfg;
   $('#reliefBlenderBtn').hidden = !cfg.blender;
+  $('#blenderGroup').hidden = !!cfg.offline;
+  if (!cfg.offline) loadBlenderStatus();
   syncNotice();
   syncGenerateButtons();
   if (cfg.offline) return;

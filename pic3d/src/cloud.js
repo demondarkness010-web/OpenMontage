@@ -35,6 +35,38 @@ export const cancelJob = (id) => api('POST', `/api/jobs/${id}/cancel`);
 export const cleanJob = (id) => api('POST', `/api/jobs/${id}/clean`);
 export const deleteJob = (id) => api('DELETE', `/api/jobs/${id}`);
 
+// Blender on the server: status, measured inspection, export with a re-import check.
+export const blenderStatus = () => api('GET', '/api/blender/status');
+export const blenderCheck = () => api('POST', '/api/blender/check');
+export const inspectJob = (id) => api('POST', `/api/jobs/${id}/inspect`);
+export const exportJob = (id, formats, sizeCm) => api('POST', `/api/jobs/${id}/export`, { formats, size_cm: sizeCm ?? null });
+export const cancelTask = (id) => api('POST', `/api/blender/tasks/${id}/cancel`);
+/** Report files the server wrote (inspection details live there, not in the job). */
+export async function getJSON(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Couldn't load ${url} (${res.status}).`);
+  return res.json();
+}
+
+/** Poll a Blender task (inspect/export) until it ends; onUpdate gets every snapshot. */
+export async function waitForTask(id, onUpdate) {
+  let misses = 0;
+  for (;;) {
+    let task;
+    try {
+      task = await api('GET', `/api/blender/tasks/${id}`);
+      misses = 0;
+    } catch (err) {
+      if ((err.status >= 400 && err.status < 500) || ++misses > 6) throw err;
+      await new Promise((r) => setTimeout(r, 1500));
+      continue;
+    }
+    onUpdate?.(task);
+    if (['done', 'failed', 'cancelled'].includes(task.status)) return task;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+}
+
 /**
  * Poll a job until it finishes. Calls onUpdate with every snapshot.
  * Resolves with the final job; rejects only on network trouble.

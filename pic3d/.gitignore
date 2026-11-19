@@ -1,3 +1,4 @@
 generated/
 generated-mock/
 __pycache__/
+tests/_work/

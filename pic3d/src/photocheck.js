@@ -155,5 +155,5 @@ export function checkPhoto(img, original) {
   } else {
     verdict = { level: 'ok', html: '<b>Looks great for 3D.</b> One clear object on a plain background.' };
   }
-  return { checks, verdict, sceneLike };
+  return { checks, verdict, sceneLike, stats: { busy, found, fill, touches, grad } };
 }

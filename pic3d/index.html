@@ -392,13 +392,6 @@
                 <span class="label">Turntable</span> <small>6s</small>
               </button>
             </div>
-            <div class="blender-fix" id="blenderFix" hidden>
-              <button class="btn" id="blenderBtn">
-                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16 15 5M12 4l4 4M3 13l4 4" /></svg>
-                Fix with Blender
-              </button>
-              <p id="blenderNote">Removes floating bits, fills small holes, fixes flipped faces and trims huge models to 150k triangles so they spin smoothly. Saved as a new model; the original stays.</p>
-            </div>
             <div class="formats" role="group" aria-label="Other formats">
               <span>Other formats</span>
               <button data-format="obj" title="Geometry for any 3D app (no materials)">.obj</button>
@@ -407,6 +400,40 @@
               <button data-format="usdz" title="AR Quick Look on iPhone and iPad">.usdz <i>AR</i></button>
             </div>
             <div class="format-links" id="formatLinks"></div>
+          </section>
+
+          <section class="group blender" id="blenderGroup" data-needs-model hidden>
+            <h3>Blender <button class="bl-status" id="blStatus" type="button">checking…</button></h3>
+            <div class="bl-actions">
+              <button class="btn" id="blInspectBtn" title="Measure holes, flipped faces, specks, self-intersections, UVs and textures, and score the model for web, games and 3D printing">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5" /><path d="m12.5 12.5 4.5 4.5" /></svg>
+                Inspect
+              </button>
+              <button class="btn" id="blenderBtn" title="Repair a copy: every change is checked and undone if it makes things worse">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M4 16 15 5M12 4l4 4M3 13l4 4" /></svg>
+                Fix
+              </button>
+              <button class="btn" id="blExportBtn" aria-expanded="false" aria-controls="blExport" title="Export with Blender, then import each file again to prove it opens">
+                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v10m-4-4 4 4 4-4M4 16h12" /></svg>
+                Export
+              </button>
+            </div>
+            <p class="bl-progress" id="blProgress" hidden><span class="spinner"></span><span id="blProgressText"></span><button class="link" id="blCancel">Stop</button></p>
+            <div class="bl-export" id="blExport" hidden>
+              <div class="bl-formats" id="blFormats">
+                <label><input type="checkbox" value="glb" checked> GLB</label>
+                <label><input type="checkbox" value="fbx"> FBX</label>
+                <label><input type="checkbox" value="obj"> OBJ</label>
+                <label><input type="checkbox" value="stl"> STL</label>
+                <label><input type="checkbox" value="usdz"> USDZ</label>
+                <label><input type="checkbox" value="ply"> PLY</label>
+                <label><input type="checkbox" value="blend"> .blend</label>
+              </div>
+              <label class="bl-size">STL real size <input type="number" id="blSize" min="0.5" max="10000" step="0.5" placeholder="as is"> cm, longest side</label>
+              <button class="btn btn-primary" id="blExportGo">Export and check</button>
+            </div>
+            <div class="bl-results" id="blResults"></div>
+            <p class="bl-note" id="blenderNote"></p>
           </section>
 
           <section class="group">

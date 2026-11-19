@@ -49,8 +49,17 @@ const CHARACTER = /\b(person|people|man|woman|girl|boy|child|kid|lady|guy|warrio
 // Places rather than things. The vision model usually says category "scene" for these, but not always.
 const SCENE = /\b(landscape|scenery|courtyard|cloister|garden|street|cityscape|skyline|village|town|forest|woods|park|beach|interior|room|plaza|square|alley|harbou?r|valley|panorama|countryside|meadow|field|ruins|grounds)s?\b/i;
 
+/**
+ * A place rather than one thing. The AI's word alone is not enough: for a garden conservatory it
+ * said "stone planter" (the one pot it could name) yet still noted the busy background. So the
+ * on-device photo check counts too: when the pixels show no single object filling the frame
+ * (photo_scene) and the AI also saw a busy background or several things, it is a scene.
+ */
 export function isScene(a) {
-  return a.category === 'scene' || SCENE.test(a.object);
+  if (a.category === 'scene' || SCENE.test(a.object)) return true;
+  if (!a.photo_scene) return false;
+  const notes = (a.problems || []).join(' ');
+  return /busy|cluttered|several|multiple|many objects|background/i.test(notes) || SCENE.test(a.description || '');
 }
 
 export function isCharacter(a) {
@@ -68,7 +77,7 @@ export function facts(analysis, overrides = {}) {
   const colourful = a.colors.length > 1 || a.fine_texture || !['sculpture'].includes(a.category);
   const character = 'character' in overrides ? overrides.character : isCharacter(a);
   return {
-    scene: isScene(a),
+    scene: isScene(a), // overrides.scene (spread below) wins when the user taps the chip
     colour: colourful,
     character,
     drawing: a.medium === 'drawing',

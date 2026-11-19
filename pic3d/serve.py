@@ -12,7 +12,13 @@ API (all JSON, localhost only). The fal.ai key never leaves this process:
     GET    /api/jobs                history, newest first
     GET    /api/jobs/<id>           poll; downloads the GLB into ./generated when done
     POST   /api/jobs/<id>/cancel    cancel a queued job
-    POST   /api/jobs/<id>/clean     clean and fix a finished model with Blender (a new job)
+    POST   /api/jobs/<id>/clean     inspect, repair (with rollback), re-check a finished model in Blender (a new job)
+    POST   /api/jobs/<id>/inspect   measure a model in Blender: geometry checks, web/game/print scores, pictures
+    POST   /api/jobs/<id>/export    {formats:[glb,obj,stl,fbx,ply,usdz,blend], size_cm?} export + re-import check
+    GET    /api/blender/status      what Blender is installed and what the last check found
+    POST   /api/blender/check       run Blender's self-check again (takes ~20-40 s)
+    GET    /api/blender/tasks/<id>  progress and report of an inspect/export
+    POST   /api/blender/tasks/<id>/cancel
     DELETE /api/jobs/<id>           remove from history and delete the local files
 
 --mock (or RELIEF_MOCK=1) fakes the provider so the UI can be exercised for free.
@@ -290,7 +296,7 @@ def quota_status() -> dict | None:
 
 PUBLIC = ("id", "model", "label", "name", "status", "created", "finished", "cost", "options", "glb",
           "source", "thumbnail", "formats", "error", "queue_position", "log", "mock", "provider", "size_cm",
-          "cleaned_from", "report")
+          "cleaned_from", "report", "inspection", "exports")
 
 
 def save_local_job(body: dict) -> dict:
@@ -625,38 +631,158 @@ def cancel_job(job_id: str) -> dict:
     return job
 
 
-# --------------------------------------------------------------------------- Blender clean-up
+# --------------------------------------------------------------------------- Blender
 
-def find_blender() -> str | None:
-    """Blender's executable: $BLENDER_PATH (the repo's convention, see tools/graphics/blender_world.py),
-    else the newest portable copy in OpenMontage/.runtime/blender/, else one on PATH."""
-    import shutil
-    env = os.environ.get("BLENDER_PATH") or load_key("BLENDER_PATH")
-    if env and Path(env).is_file():
-        return env
-    found = sorted((ROOT.parent / ".runtime" / "blender").glob("blender-*/blender.exe"),
-                   key=lambda p: [int(n) for n in re.findall(r"\d+", p.parent.name)[:3]], reverse=True)
-    if found:
-        return str(found[0])
-    return shutil.which("blender")
+import blender_runner  # noqa: E402
+
+BLENDER = blender_runner.find_blender(os.environ.get("BLENDER_PATH") or load_key("BLENDER_PATH"))
+BLENDER_JOBS = GENERATED / "blender-jobs"
+BLENDER_DIAG = blender_runner.Diagnostics(BLENDER, GENERATED / "blender-status.json")
+TASKS: dict[str, dict] = {}  # inspections and exports (they belong to a History entry, not new ones)
+EXPORT_FORMATS = ("glb", "obj", "stl", "fbx", "ply", "usdz", "blend")
+STEP_LABELS = {"load": "Loading the model", "prepare": "Preparing the mesh", "inspect": "Measuring the mesh",
+               "repair": "Repairing, with a checkpoint before every change", "render_views": "Rendering check pictures",
+               "export": "Exporting", "validate": "Re-importing the file to check it"}
 
 
-BLENDER = find_blender()
-BLENDER_SCRIPT = ROOT / "blender_clean.py"
-blender_lock = threading.Lock()  # one Blender at a time: it needs ~0.5-1 GB of RAM
-
-
-def start_clean(job_id: str) -> dict:
-    """Clean a finished model with Blender. The result is a new History entry beside the original."""
-    src = JOBS[job_id]
+def need_blender():
     if not BLENDER:
         raise ValueError("Blender isn't installed. Unzip the portable Blender into OpenMontage/.runtime/blender/, "
                          "or set BLENDER_PATH in .env to blender.exe.")
+
+
+def finished_glb(job_id: str) -> tuple[dict, Path]:
+    src = JOBS[job_id]
     if src["status"] != "done" or not src.get("glb"):
-        raise ValueError("Only a finished model can be cleaned.")
+        raise ValueError("Only a finished model can be used.")
     glb = ROOT / src["glb"].lstrip("/")
     if not glb.is_file():
         raise ValueError("That model's file is missing.")
+    return src, glb
+
+
+def progress_text(report: dict) -> str:
+    plan, steps = report.get("plan") or [], report.get("steps") or []
+    if not steps:
+        return "Starting Blender"
+    cur = steps[-1]
+    label = STEP_LABELS.get(cur["op"], cur["op"])
+    fmt = (cur.get("params") or {}).get("format")
+    if fmt:
+        label += f" ({fmt.upper()})"
+    return f"Step {len(steps)} of {len(plan)}: {label}"
+
+
+def task_url(workdir: Path, rel: str) -> str:
+    return f"/{GEN_DIR}/blender-jobs/{workdir.name}/{rel}"
+
+
+def tidy_report(report: dict, workdir: Path) -> dict:
+    """The worker's report with web links for its files, and without the bulky log."""
+    out = {k: v for k, v in report.items() if k != "process"}
+    proc = report.get("process") or {}
+    out["blender_seconds"] = proc.get("seconds")
+    out["report_url"] = task_url(workdir, "report.json")
+    out["renders"] = [task_url(workdir, r) for r in report.get("renders") or []]
+    for e in (out.get("exports") or {}).values():
+        e["url"] = task_url(workdir, e["file"])
+    for s in out.get("steps") or []:
+        s.pop("trace", None)
+    return out
+
+
+def profile_summary(inspection: dict | None) -> dict | None:
+    if not inspection or not inspection.get("ok"):
+        return None
+    return {k: {"score": v["score"], "verdict": v["verdict"], "failed": v["failed"], "warnings": v["warnings"]}
+            for k, v in (inspection.get("profiles") or {}).items() if isinstance(v, dict)}
+
+
+def start_task(kind: str, job_id: str, steps: list, timeout: float, on_done=None) -> dict:
+    """Run a Blender job that belongs to an existing History entry (inspect / export)."""
+    need_blender()
+    src, glb = finished_glb(job_id)
+    for t in TASKS.values():
+        if t["job_id"] == job_id and t["kind"] == kind and t["status"] in ("queued", "running"):
+            raise ValueError(f"Blender is already doing that ({t['progress'] or 'waiting'}).")
+    workdir = BLENDER_JOBS / f"{job_id}-{kind}"
+    import shutil
+    shutil.rmtree(workdir, ignore_errors=True)
+    task = {"id": uuid.uuid4().hex[:12], "kind": kind, "job_id": job_id, "status": "queued",
+            "progress": "Waiting for Blender" if blender_runner.lock.locked() else "Starting Blender",
+            "created": time.time(), "report": None, "error": None}
+    TASKS[task["id"]] = task
+
+    def work():
+        def prog(r):
+            task.update(status="running", progress=progress_text(r))
+        try:
+            report = blender_runner.run_job(BLENDER, {"input": str(glb), "steps": steps}, workdir, timeout,
+                                            lambda: task["status"] == "cancelled", prog)
+        except Exception as e:  # noqa: BLE001
+            task.update(status="failed", error=f"Couldn't run Blender: {e}", progress=None)
+            return
+        if task["status"] == "cancelled":
+            return
+        task["report"] = tidy_report(report, workdir)
+        ok = report.get("status") in ("done", "done_with_problems")
+        task.update(status="done" if ok else "failed", error=report.get("error"), progress=None,
+                    finished=time.time())
+        if ok and on_done and job_id in JOBS:
+            on_done(task)
+            with jobs_lock:
+                save_jobs()
+    threading.Thread(target=work, daemon=True).start()
+    return task
+
+
+def start_inspect(job_id: str) -> dict:
+    steps = [{"op": "load"}, {"op": "inspect", "label": "model", "deep": True},
+             {"op": "render_views", "views": ["front", "three_quarter", "back"], "size": 480, "shading": "clay"}]
+
+    def done(task):
+        rep = task["report"]
+        m = (rep.get("inspections") or {}).get("model")
+        JOBS[job_id]["inspection"] = {"checked": time.time(), "summary": profile_summary(m),
+                                      "renders": rep.get("renders"), "report_url": rep.get("report_url")}
+    return start_task("inspect", job_id, steps, 600, done)
+
+
+def start_export(job_id: str, body: dict) -> dict:
+    formats = body.get("formats")
+    if not isinstance(formats, list) or not formats or any(f not in EXPORT_FORMATS for f in formats):
+        raise ValueError(f"Pick formats from: {', '.join(EXPORT_FORMATS)}.")
+    size_cm = body.get("size_cm")
+    if size_cm is not None and (isinstance(size_cm, bool) or not isinstance(size_cm, (int, float))
+                                or not 0.5 <= size_cm <= 10000):
+        raise ValueError("size_cm must be 0.5–10000.")
+    # No "prepare": exporting must not touch the model (prepare clears the imported normals).
+    steps = [{"op": "load"}]
+    for f in dict.fromkeys(formats):
+        steps.append({"op": "export", "format": f, "size_cm": float(size_cm or 0) if f == "stl" else 0.0})
+        steps.append({"op": "validate", "format": f})
+
+    def done(task):
+        out = {}
+        for f, e in (task["report"].get("exports") or {}).items():
+            v = e.get("validated") or {}
+            out[f] = {"url": e.get("url"), "bytes": e.get("bytes"), "ok": bool(v.get("ok")),
+                      "problems": [] if v.get("ok") else (v.get("problems") or ["it couldn't be checked"])}
+        JOBS[job_id]["exports"] = out
+    return start_task("export", job_id, steps, 900, done)
+
+
+def cancel_task(task_id: str) -> dict:
+    task = TASKS[task_id]
+    if task["status"] in ("queued", "running"):
+        task.update(status="cancelled", progress=None)
+    return task
+
+
+def start_clean(job_id: str) -> dict:
+    """Clean and repair a finished model with Blender. The result is a new History entry beside the original."""
+    need_blender()
+    src, glb = finished_glb(job_id)
     new_id = uuid.uuid4().hex[:12]
     source = None
     if src.get("source"):
@@ -671,7 +797,8 @@ def start_clean(job_id: str) -> dict:
         "endpoint": "blender",
         "provider": "blender", "name": src["name"], "status": "queued", "created": time.time(),
         "cost": 0, "options": src.get("options") or {}, "source": source, "mock": False,
-        "size_cm": src.get("size_cm"), "cleaned_from": job_id, "log": "Waiting for Blender",
+        "size_cm": src.get("size_cm"), "cleaned_from": job_id,
+        "log": "Waiting for Blender" if blender_runner.lock.locked() else "Starting Blender",
     }
     with jobs_lock:
         JOBS[new_id] = job
@@ -680,42 +807,68 @@ def start_clean(job_id: str) -> dict:
     return job
 
 
+CLEAN_STEPS = [
+    {"op": "load"}, {"op": "prepare"},
+    {"op": "inspect", "label": "before", "deep": True},
+    {"op": "render_views", "views": ["three_quarter"], "size": 480, "shading": "clay", "tag": "before"},
+    {"op": "repair", "max_triangles": 150_000},
+    {"op": "inspect", "label": "after", "deep": True},
+    {"op": "render_views", "views": ["three_quarter"], "size": 480, "shading": "clay", "tag": "after"},
+    {"op": "export", "format": "glb"}, {"op": "validate", "format": "glb"},
+]
+KEY_METRICS = ("triangles", "vertices", "boundary_edges", "holes", "non_manifold_edges", "flipped_edges",
+               "islands", "specks", "degenerate_triangles", "duplicate_vertices", "loose_edges", "loose_vertices",
+               "self_intersecting_triangles", "watertight", "dimensions_m")
+
+
 def run_clean(job: dict, glb: Path):
-    import subprocess
-    out = GENERATED / f"{job['id']}.glb"
-    report_path = GENERATED / f"{job['id']}-report.json"
-    with blender_lock:
-        if job["status"] == "cancelled":
-            return
-        job.update(status="running", log="Blender is cleaning and fixing the mesh")
-        cmd = [BLENDER, "-b", "--factory-startup", "-noaudio", "-P", str(BLENDER_SCRIPT), "--",
-               str(glb), str(out), str(report_path), "150000"]
-        try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-            started = time.time()
-            while proc.poll() is None:
-                if job["status"] == "cancelled" or time.time() - started > 600:
-                    proc.kill()
-                    break
-                time.sleep(0.5)
-            err = proc.stderr.read().decode("utf-8", "replace")[-400:] if proc.stderr else ""
-            if job["status"] == "cancelled":
-                out.unlink(missing_ok=True)
+    workdir = BLENDER_JOBS / job["id"]
+
+    def prog(r):
+        job.update(status="running", log=progress_text(r))
+    try:
+        report = blender_runner.run_job(BLENDER, {"input": str(glb), "steps": CLEAN_STEPS}, workdir, 900,
+                                        lambda: job["status"] == "cancelled", prog)
+        if job["status"] != "cancelled":
+            rep = tidy_report(report, workdir)
+            exp = (rep.get("exports") or {}).get("glb") or {}
+            valid = (exp.get("validated") or {}).get("ok")
+            out = workdir / (exp.get("file") or "missing")
+            if report.get("status") in ("done", "done_with_problems") and valid and out.is_file():
+                dest = GENERATED / f"{job['id']}.glb"
+                dest.write_bytes(out.read_bytes())
+                summary = clean_summary(rep)
+                job.update(status="done", glb=f"/{GEN_DIR}/{dest.name}", finished=time.time(), formats={}, log=None,
+                           report=summary,
+                           inspection={"checked": time.time(), "summary": summary["profiles_after"],
+                                       "renders": [summary["renders"]["after"]] if summary["renders"]["after"] else [],
+                                       "report_url": rep["report_url"]})
+            elif report.get("status") in ("done", "done_with_problems"):
+                why = "; ".join((exp.get("validated") or {}).get("problems") or []) or "the GLB wasn't written"
+                job.update(status="failed", error=f"Blender's result didn't pass its own check: {why}", log=None)
             else:
-                report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else {}
-                if report.get("ok") and out.is_file():
-                    job.update(status="done", glb=f"/{GEN_DIR}/{out.name}", finished=time.time(),
-                               formats={}, report=report, log=None)
-                else:
-                    why = report.get("error") or (err.strip().splitlines() or ["it stopped without a report"])[-1]
-                    job.update(status="failed", error=f"Blender couldn't clean this model: {why}", log=None)
-        except Exception as e:  # noqa: BLE001
-            job.update(status="failed", error=f"Couldn't run Blender: {e}", log=None)
-        finally:
-            report_path.unlink(missing_ok=True)
+                job.update(status="failed", error=f"Blender couldn't fix this model: {report.get('error')}", log=None)
+    except Exception as e:  # noqa: BLE001
+        job.update(status="failed", error=f"Couldn't run Blender: {e}", log=None)
     with jobs_lock:
         save_jobs()
+
+
+def clean_summary(rep: dict) -> dict:
+    """What the History entry keeps: measured before/after, each repair step, the GLB check, pictures."""
+    insp = rep.get("inspections") or {}
+    b, a = insp.get("before") or {}, insp.get("after") or {}
+    glb = (rep.get("exports") or {}).get("glb") or {}
+    renders = rep.get("renders") or []
+    return {
+        "ok": True, "seconds": rep.get("blender_seconds"),
+        "before": {k: b.get(k) for k in KEY_METRICS}, "after": {k: a.get(k) for k in KEY_METRICS},
+        "profiles_before": profile_summary(b), "profiles_after": profile_summary(a),
+        "repair": rep.get("repair") or [], "validated": glb.get("validated"),
+        "renders": {"before": next((u for u in renders if "/before-" in u), None),
+                    "after": next((u for u in renders if "/after-" in u), None)},
+        "report_url": rep.get("report_url"),
+    }
 
 
 def delete_job(job_id: str):
@@ -727,6 +880,9 @@ def delete_job(job_id: str):
             f.unlink()
         except OSError:
             pass
+    import shutil
+    for d in BLENDER_JOBS.glob(f"{job_id}*"):
+        shutil.rmtree(d, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- mock provider
@@ -858,7 +1014,8 @@ CAPTION_SPACE = ("prithivmlmods-florence-2-image-caption", "Florence-2-large")
 TEXT_AI_URL = "https://text.pollinations.ai/openai"  # keyless; text only
 
 ANALYZE_FIELDS = """{
- "object": "short name, e.g. red toy robot",
+ "subject": one of "one object","several objects","scene" (scene = a place such as a garden, greenhouse, room, courtyard, street or landscape, not one thing you could pick up or move),
+ "object": "short name, e.g. red toy robot; for a scene, name the place, e.g. greenhouse garden",
  "category": one of "character","animal","vehicle","furniture","product","toy","food","plant","building","tool","jewelry","sculpture","scene","other",
  "style": one of "realistic","stylized","cartoon","low-poly",
  "medium": one of "photo","drawing","3d render" (drawing = illustration, anime or manga art, cartoon art, painting, concept art),
@@ -881,10 +1038,14 @@ ANALYZE_FIELDS = """{
  "problems": ["photo problems for 3D: cropped, several objects, busy background, blurry, dark, odd angle; empty if none"],
  "description": "one detailed sentence describing the full object from all sides for an image generator"
 }"""
-ANALYZE_PROMPT = ("You are preparing this photo for an image-to-3D model. Study the main object and reply with ONLY "
-                  "a JSON object, no other text:\n" + ANALYZE_FIELDS)
+# "Study the main object" alone made the AI name one pot in a whole garden ("stone planter"),
+# so it first has to say whether the photo is one object, several, or a place.
+ANALYZE_PROMPT = ("You are preparing this photo for an image-to-3D model. First decide whether it shows one object, "
+                  "several objects, or a whole place (a scene). Then study the main object, or the place if it is a "
+                  "scene, and reply with ONLY a JSON object, no other text:\n" + ANALYZE_FIELDS)
 
 ENUMS = {
+    "subject": ("one object", "several objects", "scene"),
     "category": ("character", "animal", "vehicle", "furniture", "product", "toy", "food", "plant", "building",
                  "tool", "jewelry", "sculpture", "scene", "other"),
     "style": ("realistic", "stylized", "cartoon", "low-poly"),
@@ -925,6 +1086,10 @@ def normalize_analysis(raw: dict) -> dict:
     out["back"] = _clean_text(raw.get("back")) or "much like the front, simpler"
     out["underside"] = _clean_text(raw.get("underside")) or "flat, so it can stand"
     out["description"] = _clean_text(raw.get("description"), 300) or out["object"]
+    if out["subject"] == "scene":
+        out["category"] = "scene"
+    if out["subject"] == "several objects" and not any("several" in p.lower() for p in out["problems"]):
+        out["problems"].append("several objects")
     return out
 
 
@@ -1085,6 +1250,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         ".png": "image/png",
         ".webp": "image/webp",
         ".glb": "model/gltf-binary",
+        ".stl": "model/stl",
+        ".obj": "model/obj",
+        ".fbx": "application/octet-stream",
+        ".ply": "application/octet-stream",
+        ".usdz": "model/vnd.usdz+zip",
+        ".blend": "application/octet-stream",
+        ".zip": "application/zip",
     }
 
     def __init__(self, *args, **kwargs):
@@ -1130,6 +1302,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.reply({"fal": bool(FAL_KEY) or MOCK, "hf": True, "hfToken": bool(HF_TOKEN), "mock": MOCK,
                                "blender": bool(BLENDER),
                                "hfQuota": None if MOCK else quota_status()})
+        if self.path == "/api/blender/status":
+            return self.reply(BLENDER_DIAG.status())
+        m = re.fullmatch(r"/api/blender/tasks/(\w+)", self.path)
+        if m:
+            task = TASKS.get(m.group(1))
+            return self.reply(task) if task else self.reply({"error": "Task not found."}, 404)
         if self.path == "/api/jobs":
             jobs = sorted(JOBS.values(), key=lambda j: j["created"], reverse=True)
             return self.reply([public(j) for j in jobs])
@@ -1197,6 +1375,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         m = re.fullmatch(r"/api/jobs/(\w+)/clean", self.path)
         if m:
             return self.guard(lambda: public(start_clean(m.group(1))), 201)
+        m = re.fullmatch(r"/api/jobs/(\w+)/inspect", self.path)
+        if m:
+            return self.guard(lambda: start_inspect(m.group(1)), 201)
+        m = re.fullmatch(r"/api/jobs/(\w+)/export", self.path)
+        if m:
+            return self.guard(lambda: start_export(m.group(1), self.body()), 201)
+        m = re.fullmatch(r"/api/blender/tasks/(\w+)/cancel", self.path)
+        if m:
+            return self.guard(lambda: cancel_task(m.group(1)))
+        if self.path == "/api/blender/check":
+            if BLENDER_DIAG.running:
+                return self.reply(BLENDER_DIAG.status())
+            threading.Thread(target=BLENDER_DIAG.check, daemon=True).start()
+            time.sleep(0.05)
+            return self.reply({**BLENDER_DIAG.status(), "checking": True}, 202)
         return self.reply({"error": "Not found."}, 404)
 
     def do_DELETE(self):

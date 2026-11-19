@@ -116,8 +116,9 @@ export function buildRelief(depth, o) {
     for (let iy = ny; iy > 0; iy--) ring.push(iy * cols + nx);              // right edge, bottom → top
     for (let ix = nx; ix > 0; ix--) ring.push(ix);                          // top edge, right → left
     for (let iy = 0; iy < ny; iy++) ring.push(iy * cols);                   // left edge, top → bottom
-    const extra = new Float32Array((ring.length * 4 + 4) * 3);
-    const extraUv = new Float32Array((ring.length * 4 + 4) * 2);
+    // 4 per wall quad, then the back: one copy of each ring point plus a centre point.
+    const extra = new Float32Array((ring.length * 5 + 1) * 3);
+    const extraUv = new Float32Array((ring.length * 5 + 1) * 2);
     let k = count;
     const sideStart = index.length;
     for (let r = 0; r < ring.length; r++) {
@@ -135,10 +136,17 @@ export function buildRelief(depth, o) {
       index.push(k, k + 3, k + 1, k + 1, k + 3, k + 2);
       k += 4;
     }
-    const bb = (k - count) * 3;
-    extra.set([-W / 2, -H / 2, back, W / 2, -H / 2, back, W / 2, H / 2, back, -W / 2, H / 2, back], bb);
-    index.push(k, k + 2, k + 1, k, k + 3, k + 2);
-    k += 4;
+    // Back plate as a fan through the same points the walls end on. A single big quad here
+    // touched the walls' bottom edges without sharing them: the solid was not closed
+    // (Blender measured 1,204 open edges and 400 "self-intersections" along that seam).
+    const centre = k + ring.length;
+    for (let r = 0; r < ring.length; r++) {
+      const p = ring[r];
+      extra.set([pos[p * 3], pos[p * 3 + 1], back], (k + r - count) * 3);
+      index.push(centre, k + ((r + 1) % ring.length), k + r); // clockwise from the front = faces back
+    }
+    extra.set([0, 0, back], (centre - count) * 3);
+    k = centre + 1;
     groups.push({ start: sideStart, count: index.length - sideStart, materialIndex: 1 });
 
     positions = new Float32Array(pos.length + extra.length);

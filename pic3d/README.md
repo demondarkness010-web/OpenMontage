@@ -154,30 +154,42 @@ Prices are per generation, as listed on fal.ai on 2026-11-12. Check fal.ai befor
 
 Meshy v7 is deprecated on fal.ai in favor of v7.1, so the app uses 7.1.
 
-### Fix with Blender (free, on your PC)
+### Blender: inspect, fix, export (free, on your PC)
 
-AI engines leave the same problems in their models:
-- specks floating around the model;
-- vertices doubled along seams;
-- small holes and flipped faces;
-- far more triangles than a laptop needs. TRELLIS.2 makes about 450k.
+Relief drives a portable Blender hidden in the background. The **Blender** section under Download shows whether Blender is installed and working; hover over the status for each self-check (version, mesh editing, glTF round trip, Workbench rendering, GPU). Click the status to run the check again.
 
-**Fix with Blender**, under Download, runs Blender hidden in the background. It:
-1. joins the parts;
-2. merges doubled vertices;
-3. deletes floating specks. Only bits that are small in both face count and size go, so a wire bar that broke off stays;
-4. fills holes of up to 24 edges, giving the patch the colours around it;
-5. points every face outward;
-6. cuts the model to 150k triangles when it has more;
-7. smooths the shading, keeping creases sharper than 40°.
+**Inspect** measures the model and changes nothing:
+- size, triangles, and the number of separate pieces and tiny specks;
+- holes, open edges and non-manifold edges, judged on merged vertices, so UV seams don't count as holes;
+- flipped faces and whether the model is inside out;
+- self-intersecting triangles (up to 300k triangles);
+- zero-area faces, loose edges and points, UVs, materials and missing textures.
 
-Textures and colours are kept. The result is saved as a new History entry ("… + Blender fix") next to the original, with a summary of what changed. Only one Blender job runs at a time.
+It scores the model for **Web**, **Game** and **3D print**. Every check shows its measured value and the threshold it was held to. A score is (checks passed + ½ × warnings) ÷ checks measured; anything that wasn't measured (wall thickness, UV overlap) is listed as such, not guessed. Blender also renders three clay pictures with Workbench, a few seconds each.
 
-Tested on the TRELLIS.2 shopping cart: Blender removed 240 specks and cut 444k triangles to 150k (16 MB to 6.5 MB), and the result looks the same in clay and textured views. It takes about 2 minutes on a Celeron N4020 and about 15 s for a small Stable Fast 3D model.
+**Fix** repairs a copy and saves it as a new History entry ("… + Blender fix"). The original stays. Its steps:
+1. merge doubled vertices;
+2. remove zero-area faces;
+3. remove loose edges and points;
+4. remove floating specks (only bits small in both face count and size, so a wire bar that broke off stays);
+5. fill holes of up to 24 edges, with the colours around them;
+6. point faces outward;
+7. reduce to 150k triangles (edges that couldn't be welded are locked, so seams don't crack open);
+8. smooth the shading.
 
-**Depth reliefs too:** on the Depth relief tab, **Fix with Blender** (under Export) saves the relief to History, runs the same Blender fix, and opens the result in the AI 3D model tab. From there it can be downloaded as OBJ, STL, PLY or USDZ like any model. Export in Photo or Studio material, not Clay, so the picture stays on it. On the cloister test photo, the relief went from 209k to 150k triangles in about 3 minutes.
+A step the inspector found nothing for is skipped and listed as "skipped" (it would only cost time). 150k is the web budget; games want ≤ 50k, so a fixed model can still say "not ready" for games.
 
-Setup: unzip the portable [Blender 4.5 LTS](https://download.blender.org/release/Blender4.5/) into `OpenMontage/.runtime/blender/`, the same place `tools/graphics/blender_world.py` looks. Or set `BLENDER_PATH` in `.env` to `blender.exe`. Without Blender, the button is hidden.
+Before each geometry step, the mesh is copied (a checkpoint). After the step, the inspector measures again. If the step made its own problem worse, changed the model's size, tore it apart or deleted too much, the copy is put back and the report says "undone" and why. The fixed GLB is then imported again into an empty scene and must match: same triangles, same size, materials and textures present. Otherwise the fix is reported as failed instead of saved. The History entry shows the measured before → after numbers, every step, and before/after pictures.
+
+**Export** writes any of GLB, FBX, OBJ (zipped with its .mtl and textures), STL (optionally scaled to a real size in millimetres), USDZ, PLY and .blend. Each file is then imported back into Blender and compared with the model: triangle count within 1%, size within 1%, materials and textures where the format keeps them. Files that fail say why.
+
+**Depth reliefs too:** on the Depth relief tab, **Fix with Blender** (under Export) saves the relief to History and runs the same fix. Export in Photo or Studio material, not Clay, so the picture stays on it. Turn on **Solid base** for 3D printing: the relief is then a closed solid (sides and back joined to the surface), and the print profile can pass. Without it a relief is an open sheet and the print check honestly fails.
+
+Times on a Celeron N4020: Blender starts in ~5–20 s; inspecting a 24k-triangle model takes under a second, plus ~4 s per picture; a full fix of a small model takes ~30 s, a 450k-triangle TRELLIS.2 model ~2–3 min. Only one Blender job runs at a time.
+
+Setup: unzip the portable [Blender 4.5 LTS](https://download.blender.org/release/Blender4.5/) into `OpenMontage/.runtime/blender/`, the same place `tools/graphics/blender_world.py` looks. Or set `BLENDER_PATH` in `.env` to `blender.exe`. Without Blender, the section says "not installed" and its buttons stay off.
+
+**Safety:** the server never sends code to Blender. A job is a JSON list of named operations from a fixed list (`blender/relief_ops.py`). Every operation, parameter, range and output path is checked before anything runs, and each job runs in its own folder under `generated/blender-jobs/` with a timeout and a Stop button.
 
 ### Download formats
 
@@ -216,7 +228,12 @@ These are made in the browser from the model on screen.
 | `src/cloud.js` | Client for the server's `/api` routes |
 | `serve.py` | Server: static files, COOP/COEP headers, fal.ai queue proxy, free Hugging Face jobs, free text-to-image proxy, photo cleanup (`tools/enhancement/cutout_engine.py`), mock mode |
 | `hfspace.py` | Minimal Gradio queue client for Hugging Face Spaces (stdlib only) |
-| `blender_clean.py` | Blender script behind **Fix with Blender**: cleans, repairs and reduces a GLB, writes a JSON report |
+| `blender_runner.py` | Finds Blender, runs its self-check, runs JSON jobs in their own folder with a timeout and cancel |
+| `blender/relief_ops.py` | The only operations Blender may run (load, prepare, inspect, repair, export, validate, render views), with parameter checks and checkpoint/rollback |
+| `blender/inspector.py` | Measures a model in Blender (numpy) and scores it for web, game and print; never changes it |
+| `blender/worker.py` / `blender/diagnose.py` | Blender-side entry points: run one job / check the install |
+| `tests/` | Regression tests: `blender_regression.py` (inside Blender) and `planner.test.mjs` (Node); see `tests/README.md` |
+| `docs/AUDIT.md` | Audit of the project, architecture, roadmap and honest limits |
 
 ## Security
 
